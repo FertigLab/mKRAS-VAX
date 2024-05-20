@@ -1,0 +1,318 @@
+---
+title: "J1994 scRNAseq visualization"
+author: Ludmila Danilova
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE, cache = TRUE)
+
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(ggprism)
+library(RColorBrewer)
+library(ggpubr)
+library(ggrepel)
+library(data.table)
+library("DT")
+library(kableExtra)
+library(gridExtra)
+library(xlsx)
+
+load("../code_inputs/2024-04-27_TCells-BothBatches-final.rda")
+
+cols = colorRampPalette(brewer.pal(8, 'Set2'))(12)
+names(cols) = c('CD4 CTL', 'CD4 Naive', 'CD4 Proliferating', 
+                'CD4 TCM', 'CD4 TEM', 'CD8 Naive', 'CD8 Proliferating', 'CD8 TCM', 
+                'CD8 TEM', 'dnT', 'MAIT', 'Treg')
+
+# create groups with TCM split into reactive and non-reactive
+createCellReact = function(gr)
+{
+  gr$cell_react = gr$batch_annotation
+  tcm = which(gr$batch_annotation == "CD4 TCM")
+  gr[tcm, "cell_react"] = paste(gr[tcm, "cell_react"], gr[tcm, "antiKRAS"], sep = "_")
+  gr$cell_react = gsub("CD4 TCM_TRUE","CD4 TCM_reactive", gr$cell_react)
+  gr$cell_react = gsub("CD4 TCM_FALSE", "CD4 TCM_nonreactive", gr$cell_react)
+  gr
+}
+
+# plot: dot plot
+getDotPlot = function(dat, title = "", lab = "Cell type")
+{
+    ggplot(data = dat, aes(x = features.plot, y = id, color = avg.exp.scaled)) + 
+    geom_point(size = 4) +
+    scale_colour_gradient2(low = "blue", high = "red", name = "Expression") +
+     theme_classic()+
+ #     theme_cowplot()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+      ylab(lab) +
+    xlab("Marker") +
+  ggtitle(title)
+}
+
+```
+
+# Intput data
+
+Alex Girgis did analysis of scRNAseq data from J1994 trial. There are two batches of samples:
+
+ - Batch 1: 1 PDAC sample with four time points (1 pre (C1D1GE) and 3 post (C2D1GE, C3D1GE, C6D1GE) vaccination). Time point C2D1GE corresponds to post-vaccination time point in batch 2
+ 
+ - Batch 2: 4 patients (1 colon (004) and 3 PDAC), two time points (pre and post vaccination)
+ 
+After discussing with Alex, we decided to use batch 2 as discovery set, mention one colon sample, but don't emphasize. These are all KRAS mutants and we are focusing on antiKRAS reactivity. The most abundant antiKRAS reactive cells are CD4 TCM. We "validate" that finding in batch 1. And we want to show something more about CD4 TCM cells and/or KRAS reactivity in terms of marker expression.0
+
+Data is in the Seurat_Objects folder
+
+## Batch 2 statistics
+
+```{r batch 2 stat, echo=FALSE,  fig.width = 5.3, fig.height=3.5, message = FALSE, warning = FALSE}
+# extract meta data for batch 2
+meta = seu2_final@meta.data
+
+meta %>% select(batch_annotation, antiKRAS) %>% table()
+meta %>% select(batch_annotation, antiKRAS, Timepoint) %>% table()
+print("CD4 TCM cells only")
+meta %>% filter(batch_annotation == "CD4 TCM") %>% select(antiKRAS, Timepoint) %>% table()
+meta %>% filter(batch_annotation == "CD4 TCM") %>% select(antiKRAS, Timepoint, Patient) %>% table()
+print("CD8 TEM cells only")
+meta %>% filter(batch_annotation == "CD8 TEM") %>% select(antiKRAS, Timepoint) %>% table()
+
+
+#DimPlot(seu2_final, reduction = "umap")
+```
+
+### UMAPs
+
+```{r umaps, echo=FALSE,  fig.width = 10, message = FALSE, warning = FALSE}
+#===============
+# with batch_annotation
+umaps = seu2_final@reductions$umap@cell.embeddings
+colnames(umaps) = c('UMAP1', 'UMAP2')
+meta = cbind(meta, umaps)
+
+gg = ggplot(meta, aes(x = UMAP1, y = UMAP2)) + 
+  geom_point(size = 0.25, color = 'grey90') + 
+  geom_point(data = meta[which(!is.na(meta$batch_annotation)),], aes(color = batch_annotation), size = 0.25) + 
+  theme_prism() +
+  guides(colour = guide_legend(override.aes = list(size=2))) + 
+  theme(axis.text = element_blank(), axis.ticks = element_blank()) + 
+  scale_color_manual(values = cols)
+
+print(gg)
+#=====================
+# CD4 TCM cells reactive vs not
+dat = meta %>% filter(batch_annotation == "CD4 TCM")
+gg_reactive = ggplot(dat, aes(x = UMAP_1, y = UMAP_2)) + 
+  geom_point(size = 0.25, color = 'grey90') + 
+  geom_point(data = dat[which(!is.na(dat$antiKRAS)),], aes(color = antiKRAS), size = 0.25) + 
+  theme_prism() +
+  guides(colour = guide_legend(override.aes = list(size=2))) + 
+  theme(axis.text = element_blank(), axis.ticks = element_blank()) + 
+  scale_color_manual(values = c('TRUE' = 'red', 'FALSE' = "grey90"))
+
+print(gg_reactive)
+```
+
+## Batch 1 statistics
+
+```{r batch 1 stat, echo=FALSE,  fig.width = 10, message = FALSE, warning = FALSE}
+meta1 = seu1_final@meta.data
+meta1 %>% select(batch_annotation, antiKRAS) %>% table()
+
+meta1 %>% filter(batch_annotation == "CD4 TCM") %>% select(antiKRAS, Sample) %>% table()
+
+```
+
+## Find markers of reactive cells withing CD4 TCM
+
+```{r tcm reactive markers, echo=FALSE, eval=FALSE}
+
+# create batch_annotation + reactivity phenotype
+Idents(seu2_final) = paste(seu2_final$batch_annotation, seu2_final$antiKRAS, sep = "_")
+
+tcm_react <- FindMarkers(seu2_final, ident.1 = "CD4 TCM_TRUE", ident.2 = "CD4 TCM_FALSE", verbose = FALSE, min.diff.pct = 0.1, only.pos = T)
+dim(tcm_react)
+head(tcm_react, n = 10)
+top_react = tcm_react %>% filter(avg_log2FC > 2 & p_val_adj < .05)%>% rownames()
+print(top_react)
+length(top_react)
+
+# save results for the supplement
+write.csv(tcm_react[top_react,], file = "CD4_TCM_reactive_markers_batch2_table.csv")
+
+# subset to CD4 TCM cells only 
+Idents(seu2_final) = meta$batch_annotation
+tcms = subset(seu2_final, idents = "CD4 TCM")
+
+# dot plot of markers by anti KRAS activity
+Idents(tcms) = tcms$antiKRAS
+dp_react2 = DotPlot(tcms, features = top_react, scale = F) +
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+      ylab("anti KRAS reactivity") +
+    xlab("Markers") +
+  scale_colour_gradient2(low = "blue", high = "red") +
+  ggtitle("Batch 2. Reactivity markers in CD4 TCM cells")
+
+dp_react_batch2 = getDotPlot(dp_react2$data, "Batch 2. CD4 TCM KRAS reactive markers", lab = "KRAS reactive")
+
+pdf("CD4_TCM_reactive_markers_umaps_batch2.pdf")
+grid.table(round(tcm_react[top_react,],3))
+#print(gg_reactive)
+print(dp_react2)
+ s = 1:4
+ for(i in 0) print(FeaturePlot(tcms, features = top_react[s+4*i]))
+dev.off()
+
+```
+
+## Dot plot of CD4 markers
+
+```{r cd4 markers, echo=FALSE, eval=FALSE}
+# NB do not execute because knit is failing due to too big dataset
+
+# read in CD4 markers from Amanda
+cd4_markers = toupper(unlist(read.xlsx("CD4 T cell markers of interest.xlsx", 1, header = F)))
+
+setdiff(cd4_markers,rownames(seu2_final))
+
+# subset to CD4  cells only 
+cd4Cells = grep("CD4", names(cols), value = T)
+# remove CTL cells for consistency with batch 1
+# because there are no those cells in batch 1
+cd4Cells = setdiff(cd4Cells, "CD4 CTL")
+
+#  batch 2
+# extract meta data for batch 2
+meta = seu2_final@meta.data
+Idents(seu2_final) = meta$batch_annotation
+cd4 = subset(seu2_final, idents = cd4Cells)
+
+
+# batch 1
+# extract meta data for batch 1
+meta1 = seu1_final@meta.data
+Idents(seu1_final) = meta1$batch_annotation
+cd4_1 = subset(seu1_final, idents = cd4Cells)
+Idents(cd4_1) = factor(Idents(cd4_1), levels = rev(cd4Cells))
+
+# subset to CD8  cells only 
+cd8Cells = grep("CD8", names(cols), value = T)
+#  batch 2
+Idents(seu2_final) = meta$batch_annotation
+cd8 = subset(seu2_final, idents = cd8Cells)
+# create Idents with treatment
+Idents(cd8) = paste(cd8$batch_annotation, cd8$Timepoint, sep = "_")
+# and save for future analysis
+#saveRDS(cd8, "cd8_cells_pre_post.rds")
+
+# find markers to get percentage of markers in each cell type
+#cd4markers_seurat = FindAllMarkers(cd4)
+
+# dot plot of CD4 markers
+# couldn't make dot plot in the form I need, so switched to ggplot
+dt_cd4 = DotPlot(cd4, features = cd4_markers, group.by = NULL)
+dt_cd4_1 = DotPlot(cd4_1, features = cd4_markers, group.by = NULL)
+dt_cd4_noscale = DotPlot(cd4, features = cd4_markers, group.by = NULL, scale = F)
+dt_cd4_1_noscale = DotPlot(cd4_1, features = cd4_markers, group.by = NULL, scale = F)
+
+# create dot plot 
+dp_cd4_batch2 = getDotPlot(dt_cd4$data, "Batch 2. CD4 markers")
+dp_cd4_batch1 = getDotPlot(dt_cd4_1$data, "Batch 1. CD4 markers")
+dp_cd4_batch2_noscale = getDotPlot(dt_cd4_noscale$data, "Batch 2. CD4 markers")
+dp_cd4_batch1_noscle = getDotPlot(dt_cd4_1_noscale$data, "Batch 1. CD4 markers")
+
+gr = createCellReact(cd4@meta.data)
+gr1 = createCellReact(cd4_1@meta.data)
+# set levels, so the groups are plotted in the specific order
+lv = c("CD4 TCM_reactive", "CD4 TCM_nonreactive", "CD4 TEM","CD4 Proliferating", "CD4 Naive")
+
+Idents(cd4) = factor(gr$cell_react, levels = lv)
+Idents(cd4_1) = factor(gr1$cell_react, levels = lv)
+
+# create data to plot for both batches
+dt_cd4_noscale = DotPlot(cd4, features = cd4_markers, group.by = NULL, scale = F)
+dt_cd4_1_noscale = DotPlot(cd4_1, features = cd4_markers, group.by = NULL, scale = F)
+# create dotplots
+pdf("dotplot_cd4_react_markers.pdf", height = 4)
+  getDotPlot(dt_cd4_noscale$data, "Batch 2. CD4 markers")
+  getDotPlot(dt_cd4_1_noscale$data, "Batch 1. CD4 markers")
+dev.off()
+
+```
+
+
+## Validation of reactive cells withing CD4 TCM in batch 1
+
+```{r validation reactive, echo=FALSE, eval=FALSE}
+# TCM markers validation
+# assign clusters from batch_annotation to find markers 
+Idents(seu1_final) = meta1$batch_annotation
+# check assingment
+head(Idents(seu1_final))
+# find markers for CD4 TCM
+# all cells
+tcm_markers_val = FindMarkers(seu1_final, ident.1 = "CD4 TCM", min.diff.pct = 0.01)
+dim(tcm_markers_val)
+# check top markers from batch 2 in these results
+tcm_markers_val[top_react,]
+
+#======================
+# reactive markers validation
+# create batch_annotation + reactivity phenotype
+Idents(seu1_final) = paste(seu1_final$batch_annotation, seu1_final$antiKRAS, sep = "_")
+
+tcm_react_val <- FindMarkers(seu1_final, ident.1 = "CD4 TCM_TRUE", ident.2 = "CD4 TCM_FALSE", verbose = FALSE)
+
+tcm_react_val[top_react,]
+sum(tcm_react_val[top_react,] %>% filter(p_val_adj < .05) %>% dim())
+
+  # subset to CD4 TCM cells only and make UMAP
+  Idents(seu1_final) = meta1$batch_annotation
+  tcms1 = subset(seu1_final, idents = "CD4 TCM")
+  Idents(tcms1) = tcms1$antiKRAS
+# seurat dot plot
+dp_react1 = DotPlot(tcms1, features = top_react, scale = F) +
+  theme_classic()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+      ylab("anti KRAS reactivity") +
+    xlab("Markers") +
+  scale_colour_gradient2(low = "blue", high = "red") +
+  ggtitle("Batch 1. Reactivity markers in CD4 TCM cells")
+
+# save tables with CD4 TCM markers and reactive markers and dot plot of reactive
+pdf("TCM_marker_validation_batch1.pdf")
+  grid.table(round(tcm_markers_val[top,],3))
+  plot.new()
+  grid.table(round(tcm_react_val[top_react,],3))
+  dp_react1
+dev.off()
+
+dp_react_batch1 = getDotPlot(dp_react1$data, "Batch 1. CD4 TCM KRAS reactive markers", lab = "KRAS reactive")
+
+# dot plots in one file
+pdf("dotPlots.pdf", height = 4)
+  dp_cd4_batch2
+  dp_cd4_batch1
+  dp_cd4_batch2_noscale
+  dp_cd4_batch1_noscle
+  dp_react2
+  dp_react1
+  dp_react_batch2
+  dp_react_batch1
+dev.off()
+
+```
+
+
+```{r echo=FALSE}
+#sessionInfo()
+```

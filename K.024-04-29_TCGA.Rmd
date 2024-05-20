@@ -1,0 +1,312 @@
+---
+title: "J1994. Compare TCRBV_CDR3 info with TCGA"
+author: Ludmila Danilova
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE,
+                      warning = FALSE, cache = TRUE)
+
+rm(list = ls())
+library(openxlsx)
+library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(data.table)
+library("DT")
+library(kableExtra)
+library(maftools)
+library(MatrixGenerics)
+library(stringdist)
+
+
+geti = function(x,i){x[i]}
+
+#===========================
+# finds common samples using the first 15 characters from barcode
+getCommonSamples = function(samples1, samples2, nameStart = 6, nameEnd = 15, uniq = T)
+{
+	# finds common samples
+	comSamples = intersect(substr(samples1,nameStart,nameEnd),substr(samples2,nameStart,nameEnd))
+#	print(comSamples)
+	# finds ids of common samples for meth and expression datasets
+	methSamp = vector()
+	exprSamp = vector()
+	for (samp in comSamples)
+	{
+		ind1 = grep(samp, samples1)
+		ind2 = grep(samp, samples2)
+		if (length(ind1)>0 && length(ind2)>0)
+		{
+			if (uniq)
+			{
+				methSamp = c(methSamp, samples1[ind1[1]])
+				exprSamp = c(exprSamp, samples2[ind2[1]])
+			}else{
+				methSamp = c(methSamp, samples1[ind1])
+				exprSamp = c(exprSamp, samples2[ind2])			
+			}
+		}
+	}
+	return (list("samp1" = methSamp,"samp2" = exprSamp))
+}
+
+# extract V gene and aaSeq and combine as TRBV_CDR3
+# to be able to compare with J1994 data
+getPairs = function(dat)
+{
+  tcgaPairs = vector(length = nrow(dat))
+for(i in 1:nrow(dat))
+  {
+    # split by comma
+    allV = unlist(strsplit(dat[i,"vAllele"], ", "))
+    # remove "TR" to be consistent with J1994 data
+    allV = gsub("TR", "", allV)
+    # combine with aaSeq
+    tcgaPairs[i] = paste(allV,dat[i,"aaSeq"], sep = "_")
+  }
+  return(unique(tcgaPairs))
+}
+
+
+```
+
+# Intput data
+
+Per patient clones are in 2024-04-18_all-filtered-diffex.tsv
+
+TCGA TCR CDR3 data is in TCGA_mitcr_cdr3_result_161008.tsv from dbGaP (https://www.cell.com/immunity/fulltext/S1074-7613(18)30121-3). 
+Unfortunately this cannot be shared directly and must be downloaded from dbGaP.
+
+Analysis plan:
+
+1. Take only beta chain in TCGA and PAAD and compare pairs
+2. Can check other cancer types.
+
+Couldn't find anything in common for pairs.
+
+Found one common CDR3 when compare with all TCGA samples
+
+
+```{r}
+# read in TCGA data
+tcgaData = read.table("C:/Users/Luda/OneDrive - Johns Hopkins/JHU/TCGA/Immune_landscape/Optitype_neoantigens/TCGA_mitcr_cdr3_result_161008.tsv", header = T, sep = "\t")
+
+# filter beta chain and PAAD samples only
+#paadPairs = getPairs(tcgaData %>% filter(chain == "beta" & Study == "PAAD"))
+#saveRDS(paadPairs, "paad_tcrv_cdr3_pairs.rds")
+paadPairs = readRDS("paad_tcrv_cdr3_pairs.rds")
+# all tumor types, beta only
+#tcgaPairs = getPairs(tcgaData %>% filter(chain == "beta"))
+#saveRDS(tcgaPairs, "tcga_tcrv_cdr3_pairs.rds")
+tcgaPairs = readRDS("tcga_tcrv_cdr3_pairs.rds")
+
+#====================
+# read in J1994 data
+pat_data = read.table("../current_tables/2024-04-18_all-filtered-diffex.tsv",sep='\t', header = T)
+# create TCRgene_clone pairs to map to TCGA data
+# remove "TCR" to be consistent with TCGA
+id = substr(pat_data$TRBV, 4, 1000000L)
+# remove 0 in the first part of the names before *
+# split, remove, combine back
+id1 = sapply(strsplit(id, "*", fixed = T), geti, 1)
+# remove 0
+id1 = gsub("0","", id1)
+id2 = sapply(strsplit(id, "*", fixed = T), geti, 2)
+# combine back
+id = paste(id1,id2,sep = "*")
+# replace artifact "*NA" with ""
+id = gsub("*NA","", id, fixed = T)
+# add pairs to the data
+pat_data$fixed_pair = paste(id,pat_data$CDR3.beta.aa, sep= "_")
+
+# take unique only
+patPairs = lapply(pat_data$fixed_pair,unique)
+# unique V genes
+#sapply(pat_data, function(x)unique(sapply(strsplit(x,"_"),geti,1)))
+
+
+#===============
+# intersect TCRV_CDR3 pairs TCGA and J1994 data
+length(intersect(patPairs,tcgaPairs)) # 27
+
+#==========================
+# compare AA sequences only
+# unique AA seq in J1994
+aaPat = unique(pat_data$CDR3.beta.aa)# 5437
+length(aaPat)
+# unique AA seq in TCGA
+aaTcga = sapply(strsplit(tcgaPairs,"_"),geti,2) # 
+aaTcga = unique(aaTcga) # 186251
+length(aaTcga)
+# unique AA seq in PAAD
+aaPAAD = sapply(strsplit(paadPairs,"_"),geti,2) # 
+aaPAAD = unique(aaPAAD) # 186251
+length(aaPAAD)
+
+# intersection
+commonAA = intersect(aaPat,aaTcga) 
+length(commonAA) # 377
+
+commonSamp = tcgaData[which(tcgaData$aaSeq %in% commonAA), ]
+commonSamp_noDup = commonSamp %>% filter(!duplicated(SampleBarcode))
+table(commonSamp_noDup$Study)
+
+# check PAAD only 
+aaPAAD = sapply(strsplit(paadPairs,"_"),geti,2) #
+aaPAAD = unique(aaPAAD)
+commonAA_paad = intersect(aaPat,aaPAAD)
+length(commonAA_paad) # 8
+
+commonSamp_paad = tcgaData[which(tcgaData$aaSeq %in% commonAA_paad), ]
+commonSamp_paad = commonSamp_paad %>% filter(!duplicated(SampleBarcode))
+table(commonSamp_paad$Study)
+
+```
+
+```{r eval = F, echo=FALSE}
+
+#============================
+# What type of mutations corresponds to that common AA seq
+# check  mutations for those samples
+# load MC3
+# mc3 = readRDS("C:/Users/Luda/OneDrive - Johns Hopkins/JHU/Articles/TCGA/MC3-PublicMAF/public_mc3_maf.rds")
+# 
+# # get common samples
+# comm = getCommonSamples(mc3@clinical.data$Tumor_Sample_Barcode, commonSamp$SampleBarcode)
+# # subset MAF to those samples
+# maf_commonSamp = subsetMaf(mc3, tsb = comm[[1]])
+# saveRDS(maf_commonSamp, "maf_commonSamp.rds")
+maf_commonSamp = readRDS("maf_commonSamp.rds")
+
+genes = getGeneSummary(maf_commonSamp)
+dim(genes)
+
+oncoplot(maf = maf_commonSamp, genes = c("KRAS","TP53"),showTumorSampleBarcodes = T)
+
+# PAAD samples only
+comm = getCommonSamples(mc3@clinical.data$Tumor_Sample_Barcode, commonSamp_paad %>% filter(Study == "PAAD") %>% select(SampleBarcode) %>% unlist)
+maf_commonSamp_paad = subsetMaf(mc3, tsb = comm[[1]])
+dim(getGeneSummary(maf_commonSamp_paad))
+# extract KRAS mutations only
+paadKRAS = maf_commonSamp_paad@data %>% filter(Hugo_Symbol == "KRAS") %>% select(Hugo_Symbol,Variant_Classification, Tumor_Sample_Barcode,  HGVSc,      HGVSp, HGVSp_Short ) # 
+paadKRAS$ParticipantBarcode = substr(paadKRAS$Tumor_Sample_Barcode,1,12)
+paadKRAS$HGVSp_Short = gsub("p.","", paadKRAS$HGVSp_Short, fixed = T)
+# 1: p.Gln61His        Q61H       TCGA-IB-7649
+# 2: p.Gly12Asp        G12D       TCGA-IB-A5SS
+# 3: p.Gly12Asp        G12D       TCGA-IB-A7LX
+
+```
+
+
+# Compare AA sequences with 2 mismatches
+
+Compare CDR3 in J1994 and TCGA
+
+From TCGA, take only pairs from PAAD samples
+
+```{r}
+aaTcga = unique(sapply(strsplit(paadPairs,"_"),geti,2)) # 
+length(aaTcga)
+# find pairwise distances between AA sequences in patients and TCGA
+set.seed(12345)
+dists = stringdistmatrix(aaPat,aaTcga, "lv")
+rownames(dists) = aaPat
+colnames(dists) = aaTcga
+
+# find seq with 1-2 mismatches in pat
+# per row minimum in patients
+m = rowMins(dists, na.rm = T, useNames = T)
+summary(m)
+minSeqPat = names(m)[which(m < 3)]
+length(minSeqPat)
+
+# find seq with 1-2 mismatches in TCGA
+m = colMins(dists, na.rm = T, useNames = T)
+names(m) = aaTcga
+minSeqTcga = names(m)[which(m < 3)]
+length(minSeqTcga)
+
+# get info about samples with those AA seq
+paadBeta = tcgaData %>% filter(chain == "beta" & Study == "PAAD")
+commonSamp_2MM = paadBeta[which(paadBeta$aaSeq %in% minSeqTcga), ]
+commonSamp_2MM_noDup = commonSamp_2MM %>% filter(!duplicated(SampleBarcode))
+# distribution of samples across studies
+table(commonSamp_2MM_noDup$Study)
+
+# Take PAAD samples
+paadSamp = commonSamp_2MM_noDup$SampleBarcode
+length(paadSamp)
+# 
+comm = getCommonSamples(mc3@clinical.data$Tumor_Sample_Barcode, paadSamp)
+maf_paadSamp = subsetMaf(mc3, tsb = comm[[1]])
+# saveRDS(maf_paadSamp, "maf_paadSamp.rds")
+# maf_paadSamp = readRDS("maf_paadSamp.rds")
+genes = getGeneSummary(maf_paadSamp)
+dim(genes)
+
+oncoplot(maf = maf_paadSamp, genes = c("KRAS","TP53"),showTumorSampleBarcodes = T)
+
+paadKRAS = maf_paadSamp@data %>% filter(Hugo_Symbol == "KRAS") %>% select(Hugo_Symbol,Variant_Classification, Tumor_Sample_Barcode,  HGVSc,      HGVSp, HGVSp_Short ) # 
+paadKRAS$ParticipantBarcode = substr(paadKRAS$Tumor_Sample_Barcode,1,12)
+paadKRAS$HGVSp_Short = gsub("p.","", paadKRAS$HGVSp_Short, fixed = T)
+
+# samples with KRAS mutation and common AA sequences
+paadKrasSamp = unique(paadKRAS$Tumor_Sample_Barcode)
+length(paadKrasSamp)
+table(paadKRAS$HGVSp_Short)
+
+# subset TCGA data to those samples
+tcgaPaadKras = commonSamp_2MM %>% filter(SampleBarcode %in% substr(paadKrasSamp,1,16))
+tab = table(tcgaPaadKras$ParticipantBarcode) 
+# add mutations to the table to plot
+mm = match(names(tab), paadKRAS$ParticipantBarcode)
+#barplot(tab)
+# add mutation info
+dat = data.frame(tab, mut = paadKRAS[mm,"HGVSp_Short"])
+rownames(dat) = dat[,1]
+colnames(dat) = c("TCGA_barcode","nCDR3","KRAS_mutation")
+# add second mutations 
+p = which(duplicated(paadKRAS$ParticipantBarcode))
+s = unlist(paadKRAS[p,"ParticipantBarcode"])
+# there are two patients with duplicated mutations
+# the first is two different mutations in KRAS
+# the second patient has the same mutations in primary and metastatic sample
+# add to the first patient only
+dat[s[1],"KRAS_mutation"] =  paste(dat[s[1],"KRAS_mutation"],                                          paadKRAS[p[1],"HGVSp_Short"], sep = "/")
+
+dat = dat[order(dat$nCDR3, decreasing = T),]
+
+# write this data as a table
+write.csv(dat, file = "TCGA_nCDR3.csv", row.names = F)
+
+mutCol = c(G12C = "#7F32BD", G12D = "#5770FF", G12R = "#690002",
+           G12V = "#FB8808", "G13C/G12A" = "#CCCCCC", Q61H = "#666666",   Q61R = "black")
+
+p = ggplot(dat, aes(y = nCDR3, x = TCGA_barcode, fill = KRAS_mutation))+
+  geom_bar(stat="identity")+
+  scale_fill_manual(values = mutCol) +
+  theme(axis.text.x=element_blank()) +
+  scale_x_discrete(limits=rownames(dat))+
+  xlab("TCGA sample") +
+  ylab("# CDR3 with < 3 mismatches")
+
+print(p)
+pdf("TCGA_nCDR3.pdf", height = 5)
+  print(p)
+dev.off()
+
+
+
+
+```
+
+```{r }
+sessionInfo()
+```
